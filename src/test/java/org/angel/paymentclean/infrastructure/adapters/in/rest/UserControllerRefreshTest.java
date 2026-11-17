@@ -3,6 +3,7 @@ package org.angel.paymentclean.infrastructure.adapters.in.rest;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
 import jakarta.servlet.FilterChain;
+import jakarta.servlet.http.Cookie;
 import org.angel.paymentclean.application.service.AuthUserUseCaseImpl;
 import org.angel.paymentclean.domain.enums.Role;
 import org.angel.paymentclean.domain.model.User;
@@ -30,7 +31,11 @@ import java.nio.charset.StandardCharsets;
 import java.util.Date;
 import java.util.Optional;
 
+import static org.hamcrest.Matchers.allOf;
+import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -72,20 +77,57 @@ class UserControllerRefreshTest {
     }
 
     @Test
-    void refreshEndpoint_withValidBearerToken_shouldReturn200AndNewJwt() throws Exception {
+    void refreshEndpoint_withValidCookie_shouldSetHttpOnlySecureStrictCookieAndHideTokenFromBody() throws Exception {
         String currentToken = jwtUtil.generateToken("angel", Role.CLIENT);
         User dbUser = new User("usr_1", "angel", "angel@correo.com", "pwd", "5512345678", "cus_1", Role.ADMIN);
         when(userRepository.findByUsername("angel")).thenReturn(Optional.of(dbUser));
 
         mockMvc.perform(post("/api/v1/auth/refresh")
-                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + currentToken)
+                        .cookie(new Cookie("auth_token", currentToken))
                         .contentType(MediaType.APPLICATION_JSON))
                 .andExpect(status().isOk())
                 .andExpect(header().string("X-User-Role", "ADMIN"))
-                .andExpect(jsonPath("$.token").isNotEmpty())
+                .andExpect(header().string(HttpHeaders.SET_COOKIE, allOf(
+                        containsString("auth_token="),
+                        containsString("HttpOnly"),
+                        containsString("Secure"),
+                        containsString("SameSite=Strict")
+                )))
+                .andExpect(jsonPath("$.token").value(nullValue()))
                 .andExpect(jsonPath("$.role").value("ADMIN"))
                 .andExpect(jsonPath("$.refreshed").value(true))
                 .andExpect(jsonPath("$.expiresAt").isNotEmpty());
+    }
+
+    @Test
+    void loginAndLogoutEndpoints_shouldSetAndClearHttpOnlySecureStrictCookie() throws Exception {
+        User dbUser = new User("usr_1", "angel", "angel@correo.com", "encoded", "5512345678", "cus_1", Role.CLIENT);
+        when(userRepository.findByUsername("angel")).thenReturn(Optional.of(dbUser));
+        when(passwordEncoder.matches("Secret123!", "encoded")).thenReturn(true);
+
+        mockMvc.perform(post("/api/v1/auth/login")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"username\":\"angel\",\"password\":\"Secret123!\"}"))
+                .andExpect(status().isOk())
+                .andExpect(header().string("X-User-Role", "CLIENT"))
+                .andExpect(header().exists("X-Token-Expires-At"))
+                .andExpect(header().string(HttpHeaders.SET_COOKIE, allOf(
+                        containsString("auth_token="),
+                        containsString("HttpOnly"),
+                        containsString("Secure"),
+                        containsString("SameSite=Strict")
+                )));
+
+        mockMvc.perform(post("/api/v1/auth/logout"))
+                .andExpect(status().isOk())
+                .andExpect(header().string(HttpHeaders.SET_COOKIE, allOf(
+                        containsString("auth_token="),
+                        containsString("Max-Age=0"),
+                        containsString("HttpOnly"),
+                        containsString("Secure"),
+                        containsString("SameSite=Strict")
+                )))
+                .andExpect(jsonPath("$.message").value("Sesión cerrada correctamente."));
     }
 
     @Test
@@ -137,6 +179,22 @@ class UserControllerRefreshTest {
         verify(chain).doFilter(request, response);
         assertNull(SecurityContextHolder.getContext().getAuthentication());
         assertEquals("TOKEN_EXPIRED", request.getAttribute(JwtFilter.JWT_ERROR_CODE_ATTR));
+    }
+
+    @Test
+    void jwtFilter_withValidHttpOnlyCookie_shouldAuthenticateRequest() throws Exception {
+        String validToken = jwtUtil.generateToken("angel", Role.ADMIN);
+
+        MockHttpServletRequest request = new MockHttpServletRequest();
+        request.setCookies(new Cookie("auth_token", validToken));
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        FilterChain chain = mock(FilterChain.class);
+
+        jwtFilter.doFilter(request, response, chain);
+
+        verify(chain).doFilter(request, response);
+        assertNotNull(SecurityContextHolder.getContext().getAuthentication());
+        assertEquals("angel", SecurityContextHolder.getContext().getAuthentication().getName());
     }
 }
 

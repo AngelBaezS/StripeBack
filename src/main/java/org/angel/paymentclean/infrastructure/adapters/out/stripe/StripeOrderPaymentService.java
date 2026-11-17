@@ -20,12 +20,19 @@ import org.angel.paymentclean.domain.model.StripePaymentResult;
 import org.angel.paymentclean.domain.port.out.StripePaymentPort;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
+import org.springframework.web.context.request.RequestAttributes;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
 
+import java.net.URI;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 
 @Component
 public class StripeOrderPaymentService implements StripePaymentPort {
@@ -184,6 +191,66 @@ public class StripeOrderPaymentService implements StripePaymentPort {
     }
 
     @Override
+    public Optional<String> resolvePaidPaymentIntentId(
+            String checkoutSessionId,
+            String paymentIntentId,
+            String expectedOrderId
+    ) {
+        if (checkoutSessionId != null && !checkoutSessionId.isBlank()) {
+            try {
+                SessionRetrieveParams retrieveParams = SessionRetrieveParams.builder()
+                        .addExpand("payment_intent")
+                        .build();
+                Session session = client.v1().checkout().sessions().retrieve(checkoutSessionId.trim(), retrieveParams);
+                if (session != null && matchesExpectedOrder(session, expectedOrderId)) {
+                    PaymentIntent expandedPi = session.getPaymentIntentObject();
+                    boolean sessionPaid = "paid".equalsIgnoreCase(session.getPaymentStatus())
+                            || (expandedPi != null && "succeeded".equalsIgnoreCase(expandedPi.getStatus()));
+                    if (sessionPaid) {
+                        String piId = session.getPaymentIntent();
+                        if ((piId == null || piId.isBlank()) && expandedPi != null) {
+                            piId = expandedPi.getId();
+                        }
+                        return Optional.of(piId != null && !piId.isBlank() ? piId : session.getId());
+                    }
+                }
+            } catch (StripeException e) {
+                log.warn("No se pudo verificar Checkout Session {} para orden {}: {}",
+                        checkoutSessionId, expectedOrderId, e.getMessage());
+            }
+        }
+
+        if (paymentIntentId != null && !paymentIntentId.isBlank()) {
+            try {
+                PaymentIntent pi = client.v1().paymentIntents().retrieve(paymentIntentId.trim());
+                if (pi != null && "succeeded".equalsIgnoreCase(pi.getStatus())) {
+                    String metaOrderId = pi.getMetadata() != null ? pi.getMetadata().get("order_id") : null;
+                    if (expectedOrderId == null || metaOrderId == null || expectedOrderId.equals(metaOrderId)) {
+                        return Optional.of(pi.getId());
+                    }
+                }
+            } catch (StripeException e) {
+                log.warn("No se pudo verificar PaymentIntent {} para orden {}: {}",
+                        paymentIntentId, expectedOrderId, e.getMessage());
+            }
+        }
+
+        return Optional.empty();
+    }
+
+    private boolean matchesExpectedOrder(Session session, String expectedOrderId) {
+        if (expectedOrderId == null || expectedOrderId.isBlank()) {
+            return true;
+        }
+        String clientRef = session.getClientReferenceId();
+        if (clientRef != null && !clientRef.isBlank() && !expectedOrderId.equals(clientRef)) {
+            return false;
+        }
+        String metaOrderId = session.getMetadata() != null ? session.getMetadata().get("order_id") : null;
+        return metaOrderId == null || metaOrderId.isBlank() || expectedOrderId.equals(metaOrderId);
+    }
+
+    @Override
     public void cancelarPaymentIntent(String paymentIntentId) {
         if (paymentIntentId == null || paymentIntentId.isBlank()) {
             return;
@@ -238,7 +305,31 @@ public class StripeOrderPaymentService implements StripePaymentPort {
         }
     }
 
-    private String resolvedFrontendUrl() {
+    private static final List<String> ALLOWED_TUNNEL_SUFFIXES = List.of(
+            ".trycloudflare.com",
+            ".lhr.life",
+            ".localhost.run",
+            ".ngrok-free.app",
+            ".ngrok-free.dev",
+            ".ngrok.io",
+            ".devtunnels.ms",
+            ".loca.lt"
+    );
+
+    String resolvedFrontendUrl() {
+        String configuredBase = normalizeConfiguredFrontendUrl();
+        RequestAttributes attrs = RequestContextHolder.getRequestAttributes();
+        if (attrs instanceof ServletRequestAttributes servletAttrs) {
+            HttpServletRequest request = servletAttrs.getRequest();
+            String requestOrigin = resolveOriginFromRequest(request, configuredBase);
+            if (requestOrigin != null) {
+                return requestOrigin;
+            }
+        }
+        return configuredBase;
+    }
+
+    private String normalizeConfiguredFrontendUrl() {
         String base = (frontendUrl == null || frontendUrl.isBlank())
                 ? "http://localhost:4200"
                 : frontendUrl.trim();
@@ -246,6 +337,82 @@ public class StripeOrderPaymentService implements StripePaymentPort {
             base = base.substring(0, base.length() - 1);
         }
         return base;
+    }
+
+    private String resolveOriginFromRequest(HttpServletRequest request, String configuredBase) {
+        if (request == null) {
+            return null;
+        }
+        String originCandidate = normalizeOrigin(request.getHeader("Origin"));
+        if (originCandidate != null && isAllowedFrontendOrigin(originCandidate, configuredBase)) {
+            return originCandidate;
+        }
+
+        String forwardedHost = firstHeaderValue(request.getHeader("X-Forwarded-Host"));
+        if (forwardedHost != null) {
+            String forwardedProto = firstHeaderValue(request.getHeader("X-Forwarded-Proto"));
+            String scheme = (forwardedProto != null && ("https".equalsIgnoreCase(forwardedProto) || "http".equalsIgnoreCase(forwardedProto)))
+                    ? forwardedProto.toLowerCase(Locale.ROOT)
+                    : (forwardedHost.startsWith("localhost") || forwardedHost.startsWith("127.0.0.1") ? "http" : "https");
+            String forwardedOrigin = normalizeOrigin(scheme + "://" + forwardedHost);
+            if (forwardedOrigin != null && isAllowedFrontendOrigin(forwardedOrigin, configuredBase)) {
+                return forwardedOrigin;
+            }
+        }
+
+        String refererCandidate = normalizeOrigin(request.getHeader("Referer"));
+        if (refererCandidate != null && isAllowedFrontendOrigin(refererCandidate, configuredBase)) {
+            return refererCandidate;
+        }
+        return null;
+    }
+
+    private String firstHeaderValue(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        String first = raw.split(",")[0].trim();
+        return first.isEmpty() ? null : first;
+    }
+
+    private String normalizeOrigin(String rawUrl) {
+        if (rawUrl == null || rawUrl.isBlank()) {
+            return null;
+        }
+        try {
+            URI uri = URI.create(rawUrl.trim());
+            String scheme = uri.getScheme();
+            String host = uri.getHost();
+            if (scheme == null || host == null || host.isBlank()) {
+                return null;
+            }
+            String lowerScheme = scheme.toLowerCase(Locale.ROOT);
+            if (!"http".equals(lowerScheme) && !"https".equals(lowerScheme)) {
+                return null;
+            }
+            int port = uri.getPort();
+            return port > 0
+                    ? lowerScheme + "://" + host.toLowerCase(Locale.ROOT) + ":" + port
+                    : lowerScheme + "://" + host.toLowerCase(Locale.ROOT);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private boolean isAllowedFrontendOrigin(String origin, String configuredBase) {
+        if (origin.equalsIgnoreCase(configuredBase)) {
+            return true;
+        }
+        URI uri = URI.create(origin);
+        String scheme = uri.getScheme().toLowerCase(Locale.ROOT);
+        String host = uri.getHost().toLowerCase(Locale.ROOT);
+        if ("localhost".equals(host) || "127.0.0.1".equals(host)) {
+            return true;
+        }
+        if ("https".equals(scheme)) {
+            return ALLOWED_TUNNEL_SUFFIXES.stream().anyMatch(host::endsWith);
+        }
+        return false;
     }
 
     private void appendLineItems(SessionCreateParams.Builder builder, List<ItemOrden> items) {

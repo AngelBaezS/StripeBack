@@ -1,45 +1,29 @@
 package org.angel.paymentclean.application.service;
 
-import jakarta.mail.internet.MimeMessage;
 import org.angel.paymentclean.domain.model.SpeiPaymentDetails;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.core.io.ByteArrayResource;
-import org.springframework.mail.javamail.JavaMailSender;
-import org.springframework.mail.javamail.MimeMessageHelper;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.text.NumberFormat;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.List;
 import java.util.Locale;
 
 /**
- * Envía por correo electrónico las instrucciones de transferencia SPEI junto con la ficha PDF adjunta.
+ * Envía por correo electrónico las instrucciones de transferencia SPEI junto con la ficha PDF adjunta
+ * utilizando Mailtrap Sandbox API (en lugar de SMTP).
  */
 @Service
 public class SpeiInstructionEmailService {
 
-    private static final Logger log = LoggerFactory.getLogger(SpeiInstructionEmailService.class);
     private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm");
 
-    private final ObjectProvider<JavaMailSender> mailSenderProvider;
-    private final String fromEmail;
-    private final String fromName;
-    private final String smtpUsername;
+    private final MailtrapEmailService mailtrapEmailService;
 
-    public SpeiInstructionEmailService(
-            ObjectProvider<JavaMailSender> mailSenderProvider,
-            @Value("${mailtrap.from.email:hello@demomailtrap.com}") String fromEmail,
-            @Value("${mailtrap.from.name:Pasarela de Pagos}") String fromName,
-            @Value("${spring.mail.username:}") String smtpUsername
-    ) {
-        this.mailSenderProvider = mailSenderProvider;
-        this.fromEmail = fromEmail;
-        this.fromName = fromName;
-        this.smtpUsername = smtpUsername;
+    @Autowired
+    public SpeiInstructionEmailService(MailtrapEmailService mailtrapEmailService) {
+        this.mailtrapEmailService = mailtrapEmailService;
     }
 
     public boolean sendSpeiInstructions(
@@ -50,38 +34,26 @@ public class SpeiInstructionEmailService {
             LocalDateTime expiresAt,
             byte[] pdfBytes
     ) {
-        if (recipientEmail == null || recipientEmail.isBlank() || speiDetails == null) {
+        if (recipientEmail == null || recipientEmail.isBlank() || speiDetails == null || mailtrapEmailService == null) {
             return false;
         }
 
-        JavaMailSender mailSender = mailSenderProvider.getIfAvailable();
-        if (mailSender == null || smtpUsername == null || smtpUsername.isBlank()) {
-            log.info("📧 [SPEI Email] Correo de instrucciones registrado para {} (orden {}). SMTP no configurado en este entorno; el PDF sigue disponible para descarga directa.",
-                    recipientEmail, orderId);
-            return false;
-        }
+        List<MailtrapEmailService.AttachmentData> attachments = (pdfBytes != null && pdfBytes.length > 0)
+                ? List.of(new MailtrapEmailService.AttachmentData(
+                        "ficha-spei-" + orderId + ".pdf",
+                        pdfBytes,
+                        "application/pdf"
+                ))
+                : List.of();
 
-        try {
-            MimeMessage message = mailSender.createMimeMessage();
-            MimeMessageHelper helper = new MimeMessageHelper(message, true, "UTF-8");
-
-            helper.setFrom(fromEmail, fromName);
-            helper.setTo(recipientEmail.trim());
-            helper.setSubject("Instrucciones de Pago SPEI - Orden " + orderId);
-            helper.setText(buildHtmlBody(customerName, orderId, speiDetails, expiresAt), true);
-
-            if (pdfBytes != null && pdfBytes.length > 0) {
-                helper.addAttachment("ficha-spei-" + orderId + ".pdf", new ByteArrayResource(pdfBytes), "application/pdf");
-            }
-
-            mailSender.send(message);
-            log.info("📧 [SPEI Email] Instrucciones y ficha PDF enviadas a {} para la orden {}.", recipientEmail, orderId);
-            return true;
-        } catch (Exception e) {
-            log.warn("⚠️ [SPEI Email] No se pudo enviar el correo SPEI a {} para orden {}: {}",
-                    recipientEmail, orderId, e.getMessage());
-            return false;
-        }
+        return mailtrapEmailService.sendEmail(
+                recipientEmail.trim(),
+                "Instrucciones de Pago SPEI - Orden " + orderId,
+                buildHtmlBody(customerName, orderId, speiDetails, expiresAt),
+                "Instrucciones SPEI para orden " + orderId + " (CLABE: " + speiDetails.clabe() + ")",
+                attachments,
+                "spei-instructions"
+        );
     }
 
     private String buildHtmlBody(
@@ -148,4 +120,3 @@ public class SpeiInstructionEmailService {
                 .replace("\"", "&quot;");
     }
 }
-

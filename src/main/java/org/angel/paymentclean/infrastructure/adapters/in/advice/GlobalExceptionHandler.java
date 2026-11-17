@@ -2,6 +2,7 @@ package org.angel.paymentclean.infrastructure.adapters.in.advice;
 
 import org.angel.paymentclean.domain.exception.ArticleBusinessConflictException;
 import org.angel.paymentclean.domain.exception.CartNotFoundException;
+import org.angel.paymentclean.domain.exception.CfdiIntegrationException;
 import org.angel.paymentclean.domain.exception.ProductNotFoundException;
 import org.angel.paymentclean.domain.exception.DomainException;
 import org.angel.paymentclean.domain.exception.InvalidProductException;
@@ -107,6 +108,7 @@ public class GlobalExceptionHandler {
             case InvalidProductException e -> HttpStatus.UNPROCESSABLE_CONTENT; // 422
             case ArticleBusinessConflictException e -> HttpStatus.CONFLICT; // 409
             case StripeIntegrationException e -> HttpStatus.BAD_GATEWAY; // 502
+            case CfdiIntegrationException e -> HttpStatus.BAD_GATEWAY; // 502
             default -> HttpStatus.BAD_REQUEST; // 400 por defecto
         };
     }

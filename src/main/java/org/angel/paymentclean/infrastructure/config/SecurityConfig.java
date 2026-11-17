@@ -70,13 +70,15 @@ public class SecurityConfig {
                             "/api/v1/auth/login",
                             "/api/v1/auth/register",
                             "/api/v1/auth/refresh",
+                            "/api/v1/auth/logout",
                             "/auth/login",
                             "/auth/register",
-                            "/auth/refresh"
+                            "/auth/refresh",
+                            "/auth/logout"
                     ).permitAll()
                     .requestMatchers("/api/v1/products/**").permitAll()
                     .requestMatchers("/api/v1/admin/**").hasRole("ADMIN")
-                    .requestMatchers("/api/v1/cart/**", "/api/v1/order/**").hasAnyRole("CLIENT", "ADMIN")
+                    .requestMatchers("/api/v1/cart/**", "/api/v1/order/**", "/api/v1/invoices/**").hasAnyRole("CLIENT", "ADMIN")
                     .requestMatchers("/error").permitAll()
                     .requestMatchers(
                             "/scalar/**",
@@ -116,7 +118,15 @@ public class SecurityConfig {
         CorsConfiguration configuration = new CorsConfiguration();
         List<String> originPatterns = new ArrayList<>(List.of(
                 "http://localhost:*",
-                "http://127.0.0.1:*"
+                "http://127.0.0.1:*",
+                "https://*.trycloudflare.com",
+                "https://*.lhr.life",
+                "https://*.localhost.run",
+                "https://*.ngrok-free.app",
+                "https://*.ngrok-free.dev",
+                "https://*.ngrok.io",
+                "https://*.devtunnels.ms",
+                "https://*.loca.lt"
         ));
         if (frontendUrl != null && !frontendUrl.isBlank() && !originPatterns.contains(frontendUrl.trim())) {
             originPatterns.add(frontendUrl.trim());
@@ -124,7 +134,7 @@ public class SecurityConfig {
         configuration.setAllowedOriginPatterns(originPatterns);
         configuration.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"));
         configuration.setAllowedHeaders(List.of("*"));
-        configuration.setExposedHeaders(List.of("Authorization", "X-User-Role", "Content-Disposition"));
+        configuration.setExposedHeaders(List.of("Authorization", "X-User-Role", "X-Token-Expires-At", "Content-Disposition"));
         configuration.setAllowCredentials(true);
         configuration.setMaxAge(3600L);
 

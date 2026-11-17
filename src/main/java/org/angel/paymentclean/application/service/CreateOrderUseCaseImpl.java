@@ -9,12 +9,16 @@ import org.angel.paymentclean.domain.model.Cart;
 import org.angel.paymentclean.domain.model.CartItem;
 import org.angel.paymentclean.domain.model.ItemOrden;
 import org.angel.paymentclean.domain.model.Order;
+import org.angel.paymentclean.domain.model.OrderInvoice;
 import org.angel.paymentclean.domain.model.Product;
 import org.angel.paymentclean.domain.model.SpeiPaymentDetails;
 import org.angel.paymentclean.domain.model.StripePaymentResult;
 import org.angel.paymentclean.domain.model.User;
 import org.angel.paymentclean.domain.port.in.CreateOrderUseCase;
+import org.angel.paymentclean.domain.port.in.InvoiceUseCase;
+import org.angel.paymentclean.domain.port.in.ProcessPaymentWebhookUseCase;
 import org.angel.paymentclean.domain.port.out.CartRepositoryPort;
+import org.angel.paymentclean.domain.port.out.OrderInvoiceRepositoryPort;
 import org.angel.paymentclean.domain.port.out.OrderRepositoryPort;
 import org.angel.paymentclean.domain.port.out.ProductRepositoryPort;
 import org.angel.paymentclean.domain.port.out.StripeCustomerPort;
@@ -56,6 +60,9 @@ public class CreateOrderUseCaseImpl implements CreateOrderUseCase {
     private final StripeCustomerPort stripeCustomerPort;
     private final SpeiVoucherPdfGenerator speiVoucherPdfGenerator;
     private final SpeiInstructionEmailService speiInstructionEmailService;
+    private final OrderInvoiceRepositoryPort orderInvoiceRepository;
+    private final ObjectProvider<ProcessPaymentWebhookUseCase> processPaymentWebhookProvider;
+    private final ObjectProvider<InvoiceUseCase> invoiceUseCaseProvider;
     private final TransactionTemplate requiresNewTxTemplate;
 
     public CreateOrderUseCaseImpl(
@@ -66,7 +73,7 @@ public class CreateOrderUseCaseImpl implements CreateOrderUseCase {
             StripePaymentPort stripePayment,
             StripeCustomerPort stripeCustomerPort) {
         this(orderRepository, userRepository, cartRepository, productRepository,
-                stripePayment, stripeCustomerPort, new SpeiVoucherPdfGenerator(), null, null);
+                stripePayment, stripeCustomerPort, new SpeiVoucherPdfGenerator(), null, null, null, null, null);
     }
 
     public CreateOrderUseCaseImpl(
@@ -79,7 +86,7 @@ public class CreateOrderUseCaseImpl implements CreateOrderUseCase {
             SpeiVoucherPdfGenerator speiVoucherPdfGenerator,
             SpeiInstructionEmailService speiInstructionEmailService) {
         this(orderRepository, userRepository, cartRepository, productRepository,
-                stripePayment, stripeCustomerPort, speiVoucherPdfGenerator, speiInstructionEmailService, null);
+                stripePayment, stripeCustomerPort, speiVoucherPdfGenerator, speiInstructionEmailService, null, null, null, null);
     }
 
     @Autowired
@@ -92,7 +99,10 @@ public class CreateOrderUseCaseImpl implements CreateOrderUseCase {
             StripeCustomerPort stripeCustomerPort,
             SpeiVoucherPdfGenerator speiVoucherPdfGenerator,
             SpeiInstructionEmailService speiInstructionEmailService,
-            ObjectProvider<PlatformTransactionManager> transactionManagerProvider) {
+            ObjectProvider<PlatformTransactionManager> transactionManagerProvider,
+            ObjectProvider<OrderInvoiceRepositoryPort> orderInvoiceRepositoryProvider,
+            ObjectProvider<ProcessPaymentWebhookUseCase> processPaymentWebhookProvider,
+            ObjectProvider<InvoiceUseCase> invoiceUseCaseProvider) {
         this.orderRepository = orderRepository;
         this.userRepository = userRepository;
         this.cartRepository = cartRepository;
@@ -103,6 +113,11 @@ public class CreateOrderUseCaseImpl implements CreateOrderUseCase {
                 ? speiVoucherPdfGenerator
                 : new SpeiVoucherPdfGenerator();
         this.speiInstructionEmailService = speiInstructionEmailService;
+        this.orderInvoiceRepository = orderInvoiceRepositoryProvider != null
+                ? orderInvoiceRepositoryProvider.getIfAvailable()
+                : null;
+        this.processPaymentWebhookProvider = processPaymentWebhookProvider;
+        this.invoiceUseCaseProvider = invoiceUseCaseProvider;
         PlatformTransactionManager txManager = transactionManagerProvider != null
                 ? transactionManagerProvider.getIfAvailable()
                 : null;
@@ -375,27 +390,139 @@ public class CreateOrderUseCaseImpl implements CreateOrderUseCase {
         return sessionResult.withOrderId(order.id());
     }
 
-    @Override
-    @Transactional
-    public List<org.angel.paymentclean.infrastructure.adapters.in.rest.dto.OrderDetailResponse> getUserOrders(String username) {
+    private List<Order> loadUserStripeOrders(String username) {
         User user = userRepository.findByUsername(username)
                 .orElseThrow(UserNotFoundException::new);
 
         LocalDateTime now = LocalDateTime.now();
-        List<Order> orders = orderRepository.findByUserId(user.id()).stream()
+        return orderRepository.findByUserId(user.id()).stream()
                 .map(order -> cancelOrderIfExpired(order, now))
+                .filter(this::isStripeOrder)
                 .sorted(Comparator.comparing(
                         Order::createdAt,
                         Comparator.nullsLast(Comparator.reverseOrder())
                 ))
                 .toList();
+    }
 
+    private boolean isStripeOrder(Order order) {
+        if (order == null) {
+            return false;
+        }
+        if (hasText(order.stripeCustomerId())
+                || hasText(order.stripePaymentIntentId())
+                || hasText(order.stripCheckoutSessionId())
+                || hasText(order.stripePaymentLinkId())
+                || hasText(order.paymentUrl())) {
+            return true;
+        }
+        return order.items() != null && order.items().stream()
+                .anyMatch(item -> item != null && hasText(item.stripePriceId()));
+    }
+
+    private boolean hasText(String value) {
+        return value != null && !value.isBlank();
+    }
+
+    private boolean matchesStatusFilter(Order order, Status status) {
+        if (status == null) {
+            return true;
+        }
+        if (status == Status.CANCELED) {
+            return order.status() == Status.CANCELED || order.status() == Status.FAILED;
+        }
+        return order.status() == status;
+    }
+
+    @Override
+    @Transactional
+    public List<org.angel.paymentclean.infrastructure.adapters.in.rest.dto.OrderDetailResponse> getUserOrders(String username) {
+        List<Order> orders = loadUserStripeOrders(username);
+        Map<String, OrderInvoice> invoiceMap = loadInvoicesMap(orders);
         return orders.stream()
-                .map(this::toOrderDetailResponse)
+                .map(order -> toOrderDetailResponse(order, invoiceMap.get(order.id())))
                 .toList();
     }
 
+    @Override
+    @Transactional
+    public org.angel.paymentclean.infrastructure.adapters.in.rest.dto.OrderPageResponse getUserOrdersPaginated(
+            String username,
+            int page,
+            int size,
+            Status status) {
+        List<Order> stripeOrders = loadUserStripeOrders(username);
+
+        int safePage = Math.max(0, page);
+        int safeSize = size > 0 ? Math.min(size, 100) : 10;
+
+        long totalAll = stripeOrders.size();
+        long totalPaid = stripeOrders.stream().filter(o -> o.status() == Status.PAID).count();
+        long totalPending = stripeOrders.stream().filter(o -> o.status() == Status.PENDING).count();
+        long totalCanceled = stripeOrders.stream()
+                .filter(o -> o.status() == Status.CANCELED || o.status() == Status.FAILED)
+                .count();
+
+        List<Order> filtered = stripeOrders.stream()
+                .filter(order -> matchesStatusFilter(order, status))
+                .toList();
+
+        long totalElements = filtered.size();
+        int totalPages = totalElements == 0 ? 0 : (int) Math.ceil((double) totalElements / safeSize);
+        int fromIndex = Math.min(safePage * safeSize, filtered.size());
+        int toIndex = Math.min(fromIndex + safeSize, filtered.size());
+
+        List<Order> pageSlice = filtered.subList(fromIndex, toIndex);
+        Map<String, OrderInvoice> invoiceMap = loadInvoicesMap(pageSlice);
+
+        List<org.angel.paymentclean.infrastructure.adapters.in.rest.dto.OrderDetailResponse> content = pageSlice
+                .stream()
+                .map(order -> toOrderDetailResponse(order, invoiceMap.get(order.id())))
+                .toList();
+
+        boolean hasNext = safePage + 1 < totalPages;
+        boolean hasPrevious = safePage > 0 && totalPages > 0;
+
+        return new org.angel.paymentclean.infrastructure.adapters.in.rest.dto.OrderPageResponse(
+                content,
+                safePage,
+                safeSize,
+                totalElements,
+                totalPages,
+                hasNext,
+                hasPrevious,
+                totalAll,
+                totalPaid,
+                totalPending,
+                totalCanceled
+        );
+    }
+
+    private Map<String, OrderInvoice> loadInvoicesMap(List<Order> orders) {
+        if (orderInvoiceRepository == null || orders == null || orders.isEmpty()) {
+            return Map.of();
+        }
+        List<String> orderIds = orders.stream().map(Order::id).toList();
+        List<OrderInvoice> invoices = orderInvoiceRepository.findByOrderIdIn(orderIds);
+        if (invoices == null || invoices.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, OrderInvoice> map = new LinkedHashMap<>();
+        for (OrderInvoice invoice : invoices) {
+            if (invoice != null && invoice.orderId() != null) {
+                map.put(invoice.orderId(), invoice);
+            }
+        }
+        return map;
+    }
+
     private org.angel.paymentclean.infrastructure.adapters.in.rest.dto.OrderDetailResponse toOrderDetailResponse(Order order) {
+        return toOrderDetailResponse(order, null);
+    }
+
+    private org.angel.paymentclean.infrastructure.adapters.in.rest.dto.OrderDetailResponse toOrderDetailResponse(
+            Order order,
+            OrderInvoice invoice) {
         List<org.angel.paymentclean.infrastructure.adapters.in.rest.dto.OrderItemResponse> itemResponses =
                 resolveNormalizedOrderItems(order).stream()
                         .map(resolved -> new org.angel.paymentclean.infrastructure.adapters.in.rest.dto.OrderItemResponse(
@@ -424,7 +551,8 @@ public class CreateOrderUseCaseImpl implements CreateOrderUseCase {
                 order.createdAt(),
                 expiresAt,
                 order.canceledAt(),
-                itemResponses
+                itemResponses,
+                InvoiceServiceImpl.toSummaryResponse(invoice)
         );
     }
 
@@ -781,6 +909,64 @@ public class CreateOrderUseCaseImpl implements CreateOrderUseCase {
         }
 
         return rawItems;
+    }
+
+    @Override
+    public org.angel.paymentclean.infrastructure.adapters.in.rest.dto.OrderDetailResponse syncOrderPaymentStatus(
+            String username,
+            String orderId,
+            String sessionId
+    ) {
+        User user = userRepository.findByUsername(username)
+                .orElseThrow(UserNotFoundException::new);
+
+        Order order = orderRepository.findById(orderId)
+                .orElseThrow(() -> new IllegalArgumentException("No se encontró la orden solicitada: " + orderId));
+
+        if (!order.userId().equals(user.id())) {
+            throw new IllegalArgumentException("No tienes permisos para consultar esta orden.");
+        }
+
+        if (order.status() == Status.PENDING) {
+            String primarySessionId = hasText(sessionId) ? sessionId.trim() : order.stripCheckoutSessionId();
+            var paidPi = stripePayment.resolvePaidPaymentIntentId(
+                    primarySessionId,
+                    order.stripePaymentIntentId(),
+                    order.id()
+            );
+            if (paidPi.isEmpty() && hasText(sessionId) && hasText(order.stripCheckoutSessionId())
+                    && !sessionId.trim().equals(order.stripCheckoutSessionId())) {
+                paidPi = stripePayment.resolvePaidPaymentIntentId(
+                        order.stripCheckoutSessionId(),
+                        order.stripePaymentIntentId(),
+                        order.id()
+                );
+            }
+
+            if (paidPi.isPresent()) {
+                ProcessPaymentWebhookUseCase webhookUseCase = processPaymentWebhookProvider != null
+                        ? processPaymentWebhookProvider.getIfAvailable()
+                        : null;
+                if (webhookUseCase != null) {
+                    log.info("🔄 [Sync Pago Stripe] Orden {} confirmada como pagada en Stripe (PI: {}). Ejecutando markOrderAsPaid...",
+                            order.id(), paidPi.get());
+                    webhookUseCase.markOrderAsPaid(order.id(), Status.PAID, paidPi.get(), order.stripeCustomerId());
+                    order = orderRepository.findById(order.id()).orElse(order);
+                }
+            }
+        } else if (order.status() == Status.PAID) {
+            InvoiceUseCase invoiceUseCase = invoiceUseCaseProvider != null
+                    ? invoiceUseCaseProvider.getIfAvailable()
+                    : null;
+            if (invoiceUseCase != null && invoiceUseCase.hasPendingInvoiceRequest(order.id())) {
+                invoiceUseCase.processAutomaticInvoiceOnPaymentConfirmed(order.id());
+            }
+        }
+
+        OrderInvoice invoice = orderInvoiceRepository != null
+                ? orderInvoiceRepository.findByOrderId(order.id()).orElse(null)
+                : null;
+        return toOrderDetailResponse(order, invoice);
     }
 
     @Override

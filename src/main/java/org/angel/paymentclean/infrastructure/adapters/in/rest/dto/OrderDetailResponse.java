@@ -17,6 +17,38 @@ public record OrderDetailResponse(
         LocalDateTime createdAt,
         LocalDateTime expiresAt,
         LocalDateTime canceledAt,
-        List<OrderItemResponse> items
-) {}
+        List<OrderItemResponse> items,
+        InvoiceSummaryResponse invoice
+) {
+    public OrderDetailResponse(
+            String id,
+            String userId,
+            String cartId,
+            String stripePaymentIntentId,
+            String paymentUrl,
+            Long totalAmountCents,
+            String currency,
+            Status status,
+            LocalDateTime createdAt,
+            LocalDateTime expiresAt,
+            LocalDateTime canceledAt,
+            List<OrderItemResponse> items
+    ) {
+        this(
+                id,
+                userId,
+                cartId,
+                stripePaymentIntentId,
+                paymentUrl,
+                totalAmountCents,
+                currency,
+                status,
+                createdAt,
+                expiresAt,
+                canceledAt,
+                items,
+                null
+        );
+    }
+}
 

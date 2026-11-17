@@ -42,5 +42,9 @@ public final class IdGenerator {
     public static String orderItemId() {
         return generatePrefixedId("oit_");
     }
+
+    public static String invoiceId() {
+        return generatePrefixedId("invo_");
+    }
 }
 

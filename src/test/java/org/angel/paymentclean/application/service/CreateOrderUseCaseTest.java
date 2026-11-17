@@ -12,7 +12,10 @@ import org.angel.paymentclean.domain.model.Product;
 import org.angel.paymentclean.domain.model.SpeiPaymentDetails;
 import org.angel.paymentclean.domain.model.StripePaymentResult;
 import org.angel.paymentclean.domain.model.User;
+import org.angel.paymentclean.domain.port.in.InvoiceUseCase;
+import org.angel.paymentclean.domain.port.in.ProcessPaymentWebhookUseCase;
 import org.angel.paymentclean.domain.port.out.CartRepositoryPort;
+import org.angel.paymentclean.domain.port.out.OrderInvoiceRepositoryPort;
 import org.angel.paymentclean.domain.port.out.OrderRepositoryPort;
 import org.angel.paymentclean.domain.port.out.ProductRepositoryPort;
 import org.angel.paymentclean.domain.port.out.StripeCustomerPort;
@@ -24,6 +27,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+
+import org.springframework.beans.factory.ObjectProvider;
 
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
@@ -281,8 +286,8 @@ class CreateOrderUseCaseTest {
 
     @Test
     void getUserOrders_shouldReturnOrdersSortedByCreatedAtDescWithNullsLast() {
-        LocalDateTime older = LocalDateTime.of(2026, 11, 10, 10, 0);
-        LocalDateTime newer = LocalDateTime.of(2026, 11, 13, 9, 0);
+        LocalDateTime older = LocalDateTime.now().minusHours(20);
+        LocalDateTime newer = LocalDateTime.now().minusHours(2);
 
         Order legacyOrder = new Order("ord_zzzz", userId, cartId, "cus_1", null, null, null, null, 1000L, "mxn", Status.PAID, List.of());
         Order olderOrder = new Order("ord_mmmm", userId, cartId, "cus_1", null, null, null, null, 2000L, "mxn", Status.PAID, List.of(), older);
@@ -701,5 +706,121 @@ class CreateOrderUseCaseTest {
         assertEquals("ord_paid_hosted_1", result.orderId());
         verify(stripePayment, never()).cancelarCheckoutSession(any());
         verify(stripePayment, never()).crearCheckoutSessionSpeiParaOrden(any(), any(), any(), any());
+    }
+
+    @Test
+    void getUserOrdersPaginated_shouldReturn10StripeOrdersPerPageWithGlobalTabTotals() {
+        List<Order> repoOrders = new java.util.ArrayList<>();
+        for (int i = 1; i <= 15; i++) {
+            Status status = i <= 6 ? Status.PAID : (i <= 11 ? Status.PENDING : Status.CANCELED);
+            repoOrders.add(new Order(
+                    "ord_stripe_" + String.format("%02d", i),
+                    userId,
+                    cartId,
+                    "cus_test_123",
+                    "pi_" + i,
+                    null,
+                    null,
+                    null,
+                    10000L * i,
+                    "mxn",
+                    status,
+                    List.of(),
+                    LocalDateTime.now().minusMinutes(15L - i),
+                    null
+            ));
+        }
+        // Orden sin vínculos a Stripe debe ser excluida
+        repoOrders.add(new Order(
+                "ord_non_stripe",
+                userId,
+                cartId,
+                null,
+                null,
+                null,
+                null,
+                null,
+                5000L,
+                "mxn",
+                Status.PAID,
+                List.of(new ItemOrden("prd_1", null, 1L)),
+                LocalDateTime.now(),
+                null
+        ));
+
+        when(userRepository.findByUsername(username)).thenReturn(Optional.of(testUser));
+        when(orderRepository.findByUserId(userId)).thenReturn(repoOrders);
+
+        var page0 = createOrderUseCase.getUserOrdersPaginated(username, 0, 10, null);
+        assertEquals(10, page0.content().size());
+        assertEquals(0, page0.page());
+        assertEquals(10, page0.size());
+        assertEquals(15, page0.totalElements());
+        assertEquals(2, page0.totalPages());
+        assertTrue(page0.hasNext());
+        assertFalse(page0.hasPrevious());
+        assertEquals(15, page0.totalAll());
+        assertEquals(6, page0.totalPaid());
+        assertEquals(5, page0.totalPending());
+        assertEquals(4, page0.totalCanceled());
+        assertEquals("ord_stripe_15", page0.content().get(0).id());
+
+        var page1 = createOrderUseCase.getUserOrdersPaginated(username, 1, 10, null);
+        assertEquals(5, page1.content().size());
+        assertEquals(1, page1.page());
+        assertFalse(page1.hasNext());
+        assertTrue(page1.hasPrevious());
+        assertEquals("ord_stripe_01", page1.content().get(4).id());
+
+        var paidPage = createOrderUseCase.getUserOrdersPaginated(username, 0, 10, Status.PAID);
+        assertEquals(6, paidPage.content().size());
+        assertEquals(6, paidPage.totalElements());
+        assertEquals(1, paidPage.totalPages());
+        assertEquals(15, paidPage.totalAll());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void syncOrderPaymentStatus_whenOrderPendingAndStripePaid_shouldInvokeMarkOrderAsPaidAndReturnUpdatedOrder() {
+        ProcessPaymentWebhookUseCase webhookUseCase = mock(ProcessPaymentWebhookUseCase.class);
+        ObjectProvider<ProcessPaymentWebhookUseCase> webhookProvider = mock(ObjectProvider.class);
+        ObjectProvider<OrderInvoiceRepositoryPort> invoiceRepoProvider = mock(ObjectProvider.class);
+        ObjectProvider<InvoiceUseCase> invoiceUseCaseProvider = mock(ObjectProvider.class);
+        when(webhookProvider.getIfAvailable()).thenReturn(webhookUseCase);
+
+        CreateOrderUseCaseImpl syncService = new CreateOrderUseCaseImpl(
+                orderRepository,
+                userRepository,
+                cartRepository,
+                productRepository,
+                stripePayment,
+                stripeCustomerPort,
+                speiVoucherPdfGenerator,
+                speiInstructionEmailService,
+                null,
+                invoiceRepoProvider,
+                webhookProvider,
+                invoiceUseCaseProvider
+        );
+
+        Order pendingOrder = new Order(
+                "ord_sync_1", userId, cartId, "cus_test_123", null, "cs_test_1", null, null,
+                16931L, "mxn", Status.PENDING, List.of(), LocalDateTime.now(), null
+        );
+        Order paidOrder = new Order(
+                "ord_sync_1", userId, cartId, "cus_test_123", "pi_paid_sync_1", "cs_test_1", null, null,
+                16931L, "mxn", Status.PAID, List.of(), pendingOrder.createdAt(), null
+        );
+
+        when(userRepository.findByUsername(username)).thenReturn(Optional.of(testUser));
+        when(orderRepository.findById("ord_sync_1")).thenReturn(Optional.of(pendingOrder), Optional.of(paidOrder));
+        when(stripePayment.resolvePaidPaymentIntentId("cs_test_1", null, "ord_sync_1"))
+                .thenReturn(Optional.of("pi_paid_sync_1"));
+
+        var result = syncService.syncOrderPaymentStatus(username, "ord_sync_1", "cs_test_1");
+
+        assertEquals("PAID", result.status().name());
+        assertEquals("pi_paid_sync_1", result.stripePaymentIntentId());
+        verify(webhookUseCase).markOrderAsPaid("ord_sync_1", Status.PAID, "pi_paid_sync_1", "cus_test_123");
     }
 }

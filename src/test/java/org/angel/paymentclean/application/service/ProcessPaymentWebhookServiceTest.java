@@ -6,9 +6,12 @@ import org.angel.paymentclean.domain.model.Cart;
 import org.angel.paymentclean.domain.model.ItemOrden;
 import org.angel.paymentclean.domain.model.Order;
 import org.angel.paymentclean.domain.model.Product;
+import org.angel.paymentclean.domain.model.User;
+import org.angel.paymentclean.domain.port.in.InvoiceUseCase;
 import org.angel.paymentclean.domain.port.out.CartRepositoryPort;
 import org.angel.paymentclean.domain.port.out.OrderRepositoryPort;
 import org.angel.paymentclean.domain.port.out.ProductRepositoryPort;
+import org.angel.paymentclean.domain.port.out.UserRepositoryPort;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -164,5 +167,35 @@ class ProcessPaymentWebhookServiceTest {
         ArgumentCaptor<Cart> cartCaptor = ArgumentCaptor.forClass(Cart.class);
         verify(cartRepository).save(cartCaptor.capture());
         assertEquals(CartStatus.CANCELED, cartCaptor.getValue().status());
+    }
+
+    @Test
+    void markOrderAsPaid_withMailtrapAndInvoiceUseCase_shouldSendConfirmationEmailAndProcessPendingInvoice() {
+        UserRepositoryPort userRepository = mock(UserRepositoryPort.class);
+        MailtrapEmailService mailtrapEmailService = mock(MailtrapEmailService.class);
+        InvoiceUseCase invoiceUseCase = mock(InvoiceUseCase.class);
+
+        ProcessPaymentWebhookService fullService = new ProcessPaymentWebhookService(
+                orderRepository, productRepository, cartRepository, userRepository, mailtrapEmailService, invoiceUseCase
+        );
+
+        ItemOrden item = new ItemOrden(productId, "price_1", 1L);
+        Order pendingOrder = new Order(
+                orderId, "usr_1", "crt_1", "cus_123", "pi_paid_ok", null, null, null,
+                15000L, "mxn", Status.PENDING, List.of(item)
+        );
+        Product product = new Product(productId, "Laptop", "Gamer", 5, true, "prod_1", "price_1", 15000L, "mxn");
+        User user = new User("usr_1", "angel", "angel@correo.mx", "pwd", "5512345678", "cus_123");
+
+        when(orderRepository.findById(orderId)).thenReturn(Optional.of(pendingOrder));
+        when(productRepository.findById(productId)).thenReturn(Optional.of(product));
+        when(userRepository.findById("usr_1")).thenReturn(Optional.of(user));
+        when(invoiceUseCase.hasPendingInvoiceRequest(orderId)).thenReturn(true);
+
+        fullService.markOrderAsPaid(orderId, Status.PAID, "pi_paid_ok", "cus_123");
+
+        verify(orderRepository).updateOrderStatusAndPaymentIntent(orderId, Status.PAID, "pi_paid_ok");
+        verify(mailtrapEmailService).sendPaymentConfirmationEmail(any(Order.class), eq(user), anyList(), eq(true));
+        verify(invoiceUseCase).processAutomaticInvoiceOnPaymentConfirmed(orderId);
     }
 }

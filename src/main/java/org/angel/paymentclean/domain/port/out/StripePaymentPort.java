@@ -4,6 +4,7 @@ import org.angel.paymentclean.domain.model.ItemOrden;
 import org.angel.paymentclean.domain.model.StripePaymentResult;
 
 import java.util.List;
+import java.util.Optional;
 
 public interface StripePaymentPort {
     StripePaymentResult crearCheckoutSessionElementsParaOrden(String dbOrderId, String stripeCustomerId, List<ItemOrden> items);
@@ -16,4 +17,12 @@ public interface StripePaymentPort {
     StripePaymentResult crearLinkDePagoParaOrdenPendiente(String dbOrderId, String stripeCustomerId, List<ItemOrden> items);
     String crearPaymentLinkDeCatalogo(String stripePriceId, long cantidad, String dbOrderId);
     List<StripePaymentResult> listarPagosPorCliente(String stripeCustomerId);
+
+    default Optional<String> resolvePaidPaymentIntentId(
+            String checkoutSessionId,
+            String paymentIntentId,
+            String expectedOrderId
+    ) {
+        return Optional.empty();
+    }
 }

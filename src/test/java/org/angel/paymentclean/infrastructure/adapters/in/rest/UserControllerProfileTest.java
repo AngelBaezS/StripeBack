@@ -1,6 +1,7 @@
 package org.angel.paymentclean.infrastructure.adapters.in.rest;
 
 import jakarta.servlet.Filter;
+import jakarta.servlet.http.Cookie;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletRequestWrapper;
 import org.angel.paymentclean.application.service.AuthUserUseCaseImpl;
@@ -26,6 +27,9 @@ import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import java.security.Principal;
 import java.util.Optional;
 
+import static org.hamcrest.Matchers.allOf;
+import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.nullValue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
@@ -81,14 +85,20 @@ class UserControllerProfileTest {
         when(userRepository.save(any(User.class))).thenAnswer(inv -> inv.getArgument(0));
 
         mockMvc.perform(put("/api/v1/auth/me/username")
-                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token)
+                        .cookie(new Cookie("auth_token", token))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"username\":\"angel_admin\"}"))
                 .andExpect(status().isOk())
                 .andExpect(header().string("X-User-Role", "ADMIN"))
+                .andExpect(header().string(HttpHeaders.SET_COOKIE, allOf(
+                        containsString("auth_token="),
+                        containsString("HttpOnly"),
+                        containsString("Secure"),
+                        containsString("SameSite=Strict")
+                )))
                 .andExpect(jsonPath("$.profile.username").value("angel_admin"))
                 .andExpect(jsonPath("$.profile.role").value("ADMIN"))
-                .andExpect(jsonPath("$.token").isNotEmpty());
+                .andExpect(jsonPath("$.token").value(nullValue()));
     }
 
     @Test

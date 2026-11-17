@@ -1,9 +1,11 @@
 package org.angel.paymentclean.infrastructure.adapters.in.rest;
 
 import jakarta.validation.Valid;
+import org.angel.paymentclean.domain.enums.Status;
 import org.angel.paymentclean.domain.model.StripePaymentResult;
 import org.angel.paymentclean.domain.port.in.CreateOrderUseCase;
 import org.angel.paymentclean.infrastructure.adapters.in.rest.dto.OrderDetailResponse;
+import org.angel.paymentclean.infrastructure.adapters.in.rest.dto.OrderPageResponse;
 import org.angel.paymentclean.infrastructure.adapters.in.rest.dto.SpeiPaymentRequest;
 import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
@@ -11,8 +13,6 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
-
-import java.util.List;
 
 @RestController
 @RequestMapping("/api/v1/order")
@@ -24,8 +24,14 @@ public class OrderController {
     }
 
     @GetMapping
-    public ResponseEntity<List<OrderDetailResponse>> getUserOrders(Authentication authentication) {
-        return ResponseEntity.ok(createOrderUseCase.getUserOrders(authentication.getName()));
+    public ResponseEntity<OrderPageResponse> getUserOrders(
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "10") int size,
+            @RequestParam(required = false) Status status,
+            Authentication authentication) {
+        return ResponseEntity.ok(
+                createOrderUseCase.getUserOrdersPaginated(authentication.getName(), page, size, status)
+        );
     }
 
     @GetMapping("/{orderId}/payment")
@@ -80,6 +86,16 @@ public class OrderController {
             @PathVariable String orderId,
             Authentication authentication) {
         return ResponseEntity.ok(createOrderUseCase.createOrGetOrderCheckoutLink(authentication.getName(), orderId));
+    }
+
+    @PostMapping("/{orderId}/sync-payment")
+    public ResponseEntity<OrderDetailResponse> syncOrderPaymentStatus(
+            @PathVariable String orderId,
+            @RequestParam(required = false) String sessionId,
+            Authentication authentication) {
+        return ResponseEntity.ok(
+                createOrderUseCase.syncOrderPaymentStatus(authentication.getName(), orderId, sessionId)
+        );
     }
 
     @PostMapping("/{orderId}/cancel")

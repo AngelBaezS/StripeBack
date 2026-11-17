@@ -6,6 +6,7 @@ import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
@@ -23,18 +24,24 @@ public class JwtFilter extends OncePerRequestFilter {
     public static final String JWT_ERROR_MESSAGE_ATTR = "jwt_error_message";
 
     private final JwtUtil jwtUtil;
+    private final JwtCookieService jwtCookieService;
 
     public JwtFilter(JwtUtil jwtUtil) {
+        this(jwtUtil, new JwtCookieService());
+    }
+
+    @Autowired
+    public JwtFilter(JwtUtil jwtUtil, JwtCookieService jwtCookieService) {
         this.jwtUtil = jwtUtil;
+        this.jwtCookieService = jwtCookieService;
     }
 
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
             throws ServletException, IOException {
-        String authHeader = request.getHeader("Authorization");
+        String token = resolveToken(request);
 
-        if (authHeader != null && authHeader.startsWith("Bearer ")) {
-            String token = authHeader.substring(7).trim();
+        if (token != null && !token.isBlank()) {
             try {
                 String username = jwtUtil.extractUsername(token);
                 String role = jwtUtil.extractRole(token);
@@ -58,5 +65,17 @@ public class JwtFilter extends OncePerRequestFilter {
         }
 
         filterChain.doFilter(request, response);
+    }
+
+    private String resolveToken(HttpServletRequest request) {
+        String cookieToken = jwtCookieService.extractTokenFromCookies(request);
+        if (cookieToken != null && !cookieToken.isBlank()) {
+            return cookieToken;
+        }
+        String authHeader = request.getHeader("Authorization");
+        if (authHeader != null && authHeader.startsWith("Bearer ")) {
+            return authHeader.substring(7).trim();
+        }
+        return null;
     }
 }
